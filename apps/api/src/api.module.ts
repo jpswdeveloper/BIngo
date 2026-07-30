@@ -9,7 +9,6 @@ import { PaymentsModule } from './payment/payment.module';
 import { WalletModule } from './wallet/wallet.module';
 import { RoleModule } from './role/role.module';
 import { CardsModule } from './cards/cards.module';
-import { TicketsModule } from './tickets/tickets.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { AdminsModule } from './admins/admins.module';
 import { SettingsModule } from './settings/settings.module';
@@ -17,6 +16,7 @@ import { AuditModule } from './audit/audit.module';
 import { RedisModule } from './redis/redis.module';
 import { SocketModule } from './socket/socket.module';
 import { AuthModule } from './auth/auth.module';
+import { GameModule } from './game/game.module';
 
 @Module({
   imports: [
@@ -27,7 +27,6 @@ import { AuthModule } from './auth/auth.module';
     WalletModule,
     RoleModule,
     CardsModule,
-    TicketsModule,
     TelegramModule,
     AdminsModule,
     SettingsModule,
@@ -35,6 +34,7 @@ import { AuthModule } from './auth/auth.module';
     RedisModule,
     SocketModule,
     AuthModule,
+    GameModule,
   ],
   controllers: [ApiController, HealthController],
   providers: [ApiService],

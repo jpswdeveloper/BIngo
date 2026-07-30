@@ -1,5 +1,7 @@
 import {
   ConflictException,
+  forwardRef,
+  Inject,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -11,64 +13,69 @@ import { DateService } from '@app/common';
 import TelegramBot, { Message } from 'node-telegram-bot-api';
 import { TelegramAuthDTO } from './DTO/telegram.dto';
 import { PaymentsService } from '../payment/payment.service';
+import { GameService } from '../game/game.service';
+import { GamePhase } from '../game/enums/game-phase.enum';
 
 @Injectable()
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot!: TelegramBot;
+  private webAppUrl!: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
     private readonly dateService: DateService,
     private readonly paymentsService: PaymentsService,
+    @Inject(forwardRef(() => GameService))
+    private readonly gameService: GameService,
   ) {}
 
   onModuleInit() {
-    const telegramBotToken =
-      this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '';
+    const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '';
+    this.webAppUrl = this.configService.get<string>('WEBAPP_URL') || '';
 
-    this.bot = new TelegramBot(telegramBotToken, { polling: true });
+    this.bot = new TelegramBot(token, { polling: true });
 
     this.telegramBotHandler();
-    // Register commands with Telegram so users see them in the [/] menu
     this.registerBotMenuCommands();
     this.logger.log('Telegram Bot initialized with polling.');
   }
 
   onModuleDestroy() {
-    if (this.bot) {
-      this.bot.stopPolling();
-    }
+    if (this.bot) this.bot.stopPolling();
   }
 
-  /**
-   * Sets up the Telegram native [/] command menu
-   */
+  // ─────────────────────────────────────────────────────────────
+  //  Bot menu commands
+  // ─────────────────────────────────────────────────────────────
+
   private async registerBotMenuCommands() {
     try {
       await this.bot.setMyCommands([
-        { command: 'start', description: 'Start the bot / Open main menu 🚀' },
+        { command: 'start',   description: 'Start the bot / Open main menu 🚀' },
+        { command: 'play',    description: 'Open the Bingo game 🎮' },
         { command: 'register', description: 'Register phone number 📝' },
         { command: 'deposit', description: 'Deposit funds to wallet 💵' },
         { command: 'balance', description: 'Check wallet balance 💰' },
-        { command: 'play', description: 'Play games 🎮' },
         { command: 'transfer', description: 'Transfer funds 🎁' },
-        { command: 'help', description: 'How to use the bot 📖' },
+        { command: 'help',    description: 'How to use the bot 📖' },
       ]);
-      this.logger.log('Telegram bot menu commands registered successfully.');
-    } catch (error) {
-      this.logger.error('Failed to set bot menu commands:', error);
+      this.logger.log('Bot menu commands registered.');
+    } catch (err) {
+      this.logger.error('Failed to set bot menu commands:', err);
     }
   }
+
+  // ─────────────────────────────────────────────────────────────
+  //  All handlers
+  // ─────────────────────────────────────────────────────────────
+
   private telegramBotHandler() {
-    // Listen for /start command
     this.bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
-      const referralCode = match?.[1]?.trim();
-      await this.handleStart(msg, referralCode);
+      await this.handleStart(msg, match?.[1]?.trim());
     });
 
-    // Event listener for /register command or button press
     this.bot.onText(/\/register|Register 📝/, async (msg) => {
       await this.promptContactSharing(msg);
     });
@@ -78,125 +85,66 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.bot.onText(/\/balance|Check Balance 💵/, async (msg) => {
-      await this.bot.sendMessage(
-        msg.chat.id,
-        '💵 Balance check feature is under development. Stay tuned!',
-      );
+      await this.handleBalance(msg);
     });
 
+    // ── /play and "Play 🎮" button ──────────────────────────────
     this.bot.onText(/\/play|Play 🎮/, async (msg) => {
-      await this.bot.sendMessage(
-        msg.chat.id,
-        '🎮 Game feature is under development. Stay tuned!',
-      );
+      await this.handlePlay(msg);
     });
 
     this.bot.onText(/\/transfer|Transfer 🎁/, async (msg) => {
       await this.bot.sendMessage(
         msg.chat.id,
-        '🎁 Transfer feature is under development. Stay tuned!',
+        '🎁 Transfer feature is coming soon. Stay tuned!',
       );
     });
 
     this.bot.onText(/\/help/, async (msg) => {
-      await this.sendMainMenu(msg.chat.id, '📖 Here are the available commands and menu options:');
+      await this.sendMainMenu(
+        msg.chat.id,
+        '📖 Here are the available commands:',
+      );
     });
 
-    // Listen for shared contact payload
     this.bot.on('contact', async (msg) => {
       await this.registerTelegramUser(msg);
     });
 
-    // Main message handler
     this.bot.on('message', async (msg) => {
       if (!msg.text) return;
-
       const text = msg.text.trim();
       const chatId = msg.chat.id;
 
       this.logger.log(
-        `Received message from ${msg.from?.username || msg.from?.id}: ${text}`,
+        `Message from ${msg.from?.username ?? msg.from?.id}: ${text}`,
       );
 
-      // Handle Keyboard Buttons only. Slash commands are handled by onText() above.
-      if (text === 'Play 🎮') {
-        await this.bot.sendMessage(
-          chatId,
-          '🎮 Game feature is under development. Stay tuned!',
-        );
-        return;
-      }
-
-      if (text === 'Check Balance 💵') {
-        await this.bot.sendMessage(
-          chatId,
-          '💵 Balance check feature is under development. Stay tuned!',
-        );
-        return;
-      }
-
-      if (text === 'Deposit 💵') {
-        await this.bot.sendMessage(
-          chatId,
-          '💰 ማስገባት የሚፈልጉትን መጠን ከ10 ብር ጀምሮ ያስገቡ።',
-          { reply_markup: { force_reply: true } },
-        );
-        return;
-      }
-
+      if (text === 'Check Balance 💵') { await this.handleBalance(msg); return; }
+      if (text === 'Deposit 💵')       { await this.promptDepositAmount(msg); return; }
       if (text === 'Contact Support ☎️') {
-        await this.bot.sendMessage(
-          chatId,
-          '☎️ Contact support feature is under development. Stay tuned!',
-        );
+        await this.bot.sendMessage(chatId, '☎️ Contact support is coming soon!');
         return;
       }
-
       if (text === 'Instruction 📖') {
-        await this.bot.sendMessage(
-          chatId,
-          '📖 Instruction feature is under development. Stay tuned!',
-        );
+        await this.bot.sendMessage(chatId, '📖 Instructions feature coming soon!');
         return;
       }
-
       if (text === 'Transfer 🎁') {
-        await this.bot.sendMessage(
-          chatId,
-          '🎁 Transfer feature is under development. Stay tuned!',
-        );
+        await this.bot.sendMessage(chatId, '🎁 Transfer feature coming soon!');
         return;
       }
-
       if (text.startsWith('/')) return;
 
-      // Check if user entered deposit amount
-      const isNumericAmount = /^\d+(?:\.\d{1,2})?$/.test(text);
+      // Numeric → deposit flow
+      const isAmount = /^\d+(?:\.\d{1,2})?$/.test(text);
+      if (isAmount) {
+        await this.handleDepositAmount(msg, parseFloat(text));
+        return;
+      }
 
-      if (isNumericAmount) {
-        const amount = parseFloat(text);
-
-        if (amount < 10) {
-          await this.bot.sendMessage(
-            chatId,
-            '⚠️ አነስተኛው የማስገቢያ መጠን 10 ብር ነው። እባክዎ ከ10 ብር በላይ ያስገቡ።',
-          );
-        } else {
-          await this.paymentsService.createDepositIntent({
-            telegramId: msg.from!.id.toString(),
-            expectedAmount: amount,
-            paymentMethod: 'Telebirr',
-          });
-
-          await this.bot.sendMessage(
-            chatId,
-            `💵 እባክዎን **${amount} ብር** ወደዚህ ቁጥር በ Telebirr ያስገቡ:\n\n` +
-              `📱 **+251911111111**\n\n` +
-              `ክፍያውን እንደጨረሱ የተላከዎትን **SMS ደረሰኝ** ኮፒ አድርገው እዚህ ይላኩ::`,
-            { parse_mode: 'Markdown' },
-          );
-        }
-      } else if (
+      // Telebirr receipt
+      if (
         text.includes('transferred') ||
         text.includes('Transaction ID') ||
         text.includes('transactioninfo.ethiotelecom.et') ||
@@ -209,6 +157,128 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // ─────────────────────────────────────────────────────────────
+  //  /play handler — the key integration
+  // ─────────────────────────────────────────────────────────────
+
+  private async handlePlay(msg: Message) {
+    const chatId = msg.chat.id;
+
+    if (!this.webAppUrl || !this.webAppUrl.startsWith('https://')) {
+      await this.bot.sendMessage(
+        chatId,
+        '⚠️ Game web app is not configured yet\\. Please check back soon\\!',
+        { parse_mode: 'MarkdownV2' },
+      );
+      this.logger.warn(
+        `WEBAPP_URL is not set or not HTTPS ("${this.webAppUrl}"). /play button skipped.`,
+      );
+      return;
+    }
+
+    // Fetch the active game state
+    const gameState = await this.gameService.getActiveGame().catch(() => null);
+
+    if (!gameState) {
+      // No active game — still show the button but with a note
+      await this.bot.sendMessage(
+        chatId,
+        [
+          '🎮 *BIngo Game*',
+          '',
+          'No game is running right now\\.',
+          'Open the app to check back soon — a new game will start shortly\\!',
+        ].join('\n'),
+        {
+          parse_mode: 'MarkdownV2',
+          reply_markup: {
+            inline_keyboard: [[
+              {
+                text: '🎮 Open BIngo',
+                web_app: { url: this.webAppUrl },
+              },
+            ]],
+          },
+        },
+      );
+      return;
+    }
+
+    // Build a status line depending on the phase
+    const phaseLines: Record<GamePhase, string> = {
+      [GamePhase.CARD_SELECTION]: `🟢 *Card Selection Open* — Pick your card now\\!`,
+      [GamePhase.COUNTDOWN]:      `⏳ *Starting Soon* — Countdown in progress\\!`,
+      [GamePhase.DRAWING]:        `🔴 *LIVE* — Numbers are being drawn\\!`,
+      [GamePhase.GAME_OVER]:      `🏁 *Game Over* — Next game coming soon\\!`,
+    };
+
+    const soldPct = Math.round(
+      (gameState.soldCardNumbers.length / 600) * 100,
+    );
+
+    const lines = [
+      `🎮 *BIngo — ${this.escapeMarkdown(gameState.gameCode)}*`,
+      '',
+      phaseLines[gameState.phase],
+      '',
+      `🎫 Ticket price: *${gameState.ticketPrice} ETB*`,
+      `👥 Players: *${gameState.soldCardNumbers.length}* \\(${soldPct}% cards sold\\)`,
+      `🏆 Win condition: *${this.escapeMarkdown(gameState.winPattern.replace('_', ' '))}*`,
+    ];
+
+    if (gameState.phase === GamePhase.DRAWING) {
+      lines.push(
+        '',
+        `🎱 Numbers drawn: *${gameState.drawnNumbers.length} / 75*`,
+        gameState.currentDraw
+          ? `🔔 Last drawn: *${gameState.currentDraw}*`
+          : '',
+      );
+    }
+
+    await this.bot.sendMessage(chatId, lines.filter(Boolean).join('\n'), {
+      parse_mode: 'MarkdownV2',
+      reply_markup: {
+        inline_keyboard: [[
+          {
+            text: this.getPlayButtonLabel(gameState.phase),
+            web_app: { url: this.webAppUrl },
+          },
+        ]],
+      },
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Balance handler
+  // ─────────────────────────────────────────────────────────────
+
+  private async handleBalance(msg: Message) {
+    if (!msg.from) return;
+    const user = await this.usersService
+      .findByTelegramId(msg.from.id.toString())
+      .catch(() => null);
+
+    if (!user) {
+      await this.bot.sendMessage(
+        msg.chat.id,
+        '⚠️ User not found\\. Please /start first\\.',
+        { parse_mode: 'MarkdownV2' },
+      );
+      return;
+    }
+
+    await this.bot.sendMessage(
+      msg.chat.id,
+      `💰 Your wallet balance: *${user.walletBalance} ETB*`,
+      { parse_mode: 'MarkdownV2' },
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Deposit helpers
+  // ─────────────────────────────────────────────────────────────
+
   private async promptDepositAmount(msg: Message) {
     await this.bot.sendMessage(
       msg.chat.id,
@@ -216,15 +286,46 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       { reply_markup: { force_reply: true } },
     );
   }
+
+  private async handleDepositAmount(msg: Message, amount: number) {
+    const chatId = msg.chat.id;
+    if (amount < 10) {
+      await this.bot.sendMessage(
+        chatId,
+        '⚠️ አነስተኛው የማስገቢያ መጠን 10 ብር ነው። እባክዎ ከ10 ብር በላይ ያስገቡ።',
+      );
+      return;
+    }
+
+    await this.paymentsService.createDepositIntent({
+      telegramId: msg.from!.id.toString(),
+      expectedAmount: amount,
+      paymentMethod: 'Telebirr',
+    });
+
+    await this.bot.sendMessage(
+      chatId,
+      `💵 እባክዎን **${amount} ብር** ወደዚህ ቁጥር በ Telebirr ያስገቡ:\n\n` +
+        `📱 **+251911111111**\n\n` +
+        `ክፍያውን እንደጨረሱ የተላከዎትን **SMS ደረሰኝ** ኮፒ አድርገው እዚህ ይላኩ::`,
+      { parse_mode: 'Markdown' },
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  User registration
+  // ─────────────────────────────────────────────────────────────
+
   private async handleStart(msg: Message, referralCode?: string) {
     if (!msg.from) return;
-
     const telUser = this.buildAuthDto(msg);
-    const user = await this.usersService.findOrCreateFromTelegram(telUser);
-
+    const user = await this.usersService.findOrCreateFromTelegram(
+      telUser,
+      referralCode,
+    );
     await this.sendMainMenu(
       msg.chat.id,
-      `👋 Welcome ${user.firstName}! Choose an Option below.`,
+      `👋 Welcome ${user.firstName}\\! Choose an option below\\.`,
     );
   }
 
@@ -240,17 +341,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const telUser: TelegramAuthDTO = this.buildAuthDto(msg);
+    const telUser = this.buildAuthDto(msg);
     const user = await this.usersService.findOrCreateFromTelegram(telUser);
-
-    const updatedUser = await this.usersService.updatePhoneNumber(
+    const updated = await this.usersService.updatePhoneNumber(
       user._id.toString(),
       contact.phone_number,
     );
 
     await this.sendMainMenu(
       msg.chat.id,
-      `ምዝገባዎ ተጠናቋል። መልካም እድል ${updatedUser.firstName}!`,
+      `✅ ምዝገባዎ ተጠናቋል\\. መልካም እድል ${this.escapeMarkdown(updated.firstName)}\\!`,
     );
   }
 
@@ -260,14 +360,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       '📱 ምዝገባውን ለመጨረስ ፡ "📞 Share contact" የሚለውን ይጫኑ::',
       {
         reply_markup: {
-          keyboard: [
-            [
-              {
-                text: '📞 Share contact',
-                request_contact: true,
-              },
-            ],
-          ],
+          keyboard: [[{ text: '📞 Share contact', request_contact: true }]],
           resize_keyboard: true,
           one_time_keyboard: true,
         },
@@ -275,61 +368,78 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  // ─────────────────────────────────────────────────────────────
+  //  Main menu
+  // ─────────────────────────────────────────────────────────────
+
   private async sendMainMenu(chatId: number, text: string) {
     await this.bot.sendMessage(chatId, text, {
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       reply_markup: {
         keyboard: [
-          [{ text: 'Play 🎮' }, { text: 'Register 📝' }],
-          [{ text: 'Check Balance 💵' }, { text: 'Deposit 💵' }],
+          [{ text: 'Play 🎮' },          { text: 'Register 📝' }],
+          [{ text: 'Check Balance 💵' },  { text: 'Deposit 💵' }],
           [{ text: 'Contact Support ☎️' }, { text: 'Instruction 📖' }],
-          [{ text: 'Transfer 🎁' }, { text: 'Withdraw 🤑' }],
-          [{ text: 'Invite 🔗' }, { text: 'Convert Bonus 🔀' }],
+          [{ text: 'Transfer 🎁' },       { text: 'Withdraw 🤑' }],
+          [{ text: 'Invite 🔗' },         { text: 'Convert Bonus 🔀' }],
         ],
         resize_keyboard: true,
       },
     });
   }
 
-  private buildAuthDto(msg: Message): TelegramAuthDTO {
-    const msgFrom = msg.from;
-    return {
-      id: msgFrom?.id.toString() || '',
-      firstName: msgFrom?.first_name || '',
-      lastName: msgFrom?.last_name,
-      username: msgFrom?.username,
-      authDate: Math.floor(Date.now() / 1000).toString(),
-      hash: '',
-    };
-  }
+  // ─────────────────────────────────────────────────────────────
+  //  Deposit receipt processing
+  // ─────────────────────────────────────────────────────────────
 
   private async processDepositReceipt(msg: Message) {
     const text = msg.text || '';
     const telegramId = msg.from?.id.toString();
-
     if (!telegramId || !text) return;
 
     try {
-      const result = await this.paymentsService.processReceipt(
-        telegramId,
-        text,
-      );
-
+      const result = await this.paymentsService.processReceipt(telegramId, text);
       await this.bot.sendMessage(msg.chat.id, result.message, {
         parse_mode: 'Markdown',
       });
     } catch (error) {
-      this.logger.error(
-        `Error processing deposit for Telegram user ${telegramId}:`,
-        error,
-      );
-
-      const errorMessage =
+      this.logger.error(`Receipt error for ${telegramId}:`, error);
+      const errMsg =
         error instanceof ConflictException
           ? error.message
           : '⚠️ ክፍያውን በማስኬድ ላይ ስህተት ተፈጥሯል። እባክዎ ትንሽ ቆይተው እንደገና ይሞክሩ።';
-
-      await this.bot.sendMessage(msg.chat.id, errorMessage);
+      await this.bot.sendMessage(msg.chat.id, errMsg);
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  Helpers
+  // ─────────────────────────────────────────────────────────────
+
+  private getPlayButtonLabel(phase: GamePhase): string {
+    const labels: Record<GamePhase, string> = {
+      [GamePhase.CARD_SELECTION]: '🎫 Pick Your Card',
+      [GamePhase.COUNTDOWN]:      '⏳ Watch Countdown',
+      [GamePhase.DRAWING]:        '🎱 Watch Live Draw',
+      [GamePhase.GAME_OVER]:      '🏁 See Results',
+    };
+    return labels[phase] ?? '🎮 Open BIngo';
+  }
+
+  /** Escape special characters for MarkdownV2 */
+  private escapeMarkdown(text: string): string {
+    return text.replace(/([_*[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  }
+
+  private buildAuthDto(msg: Message): TelegramAuthDTO {
+    const f = msg.from;
+    return {
+      id: f?.id.toString() || '',
+      firstName: f?.first_name || '',
+      lastName: f?.last_name,
+      username: f?.username,
+      authDate: Math.floor(Date.now() / 1000).toString(),
+      hash: '',
+    };
   }
 }
