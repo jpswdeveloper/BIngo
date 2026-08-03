@@ -6,9 +6,7 @@ import { WinPattern } from '../enums/win-pattern.enum';
 export type GameDocument = HydratedDocument<Game>;
 
 @Schema({
-  timestamps: {
-    currentTime: () => Date.now() + 3 * 60 * 60 * 1000,
-  },
+  timestamps: true,
   collection: 'games',
 })
 export class Game {
@@ -32,8 +30,12 @@ export class Game {
   @Prop({ type: Number, required: true, min: 1, default: 50 })
   ticketPrice!: number;
 
-  /** Seconds to wait in COUNTDOWN before first draw */
+  /** Seconds to wait in CARD_SELECTION for purchasing cards */
   @Prop({ type: Number, required: true, default: 30 })
+  purchasingSeconds!: number;
+
+  /** Seconds to wait in COUNTDOWN before first draw */
+  @Prop({ type: Number, required: true, default: 10 })
   countdownSeconds!: number;
 
   /** Seconds between each drawn number */

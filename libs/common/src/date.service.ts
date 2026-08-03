@@ -17,10 +17,9 @@ export class DateService {
     return getTimezoneMeta();
   }
 
+  /** Returns the current UTC Date. Store dates as UTC; display via toISO() which renders GMT+3. */
   now(): Date {
-    const now = new Date();
-    now.setHours(now.getHours() + 3);
-    return now;
+    return new Date();
   }
 
   nowISO(): string {

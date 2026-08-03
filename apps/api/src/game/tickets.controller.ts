@@ -22,7 +22,39 @@ export class TicketsController {
   async buyTicket(
     @Body() body: { telegramId: string; cardNumber: number },
   ) {
-    return this.ticketsService.buyTicket(body.telegramId, body.cardNumber);
+    const ticket = await this.ticketsService.buyTicket(body.telegramId, body.cardNumber);
+    return {
+      success: true,
+      ticket: {
+        id: ticket._id.toString(),
+        gameId: ticket.gameId.toString(),
+        cardNumber: ticket.cardNumber,
+        pricePaid: ticket.pricePaid,
+        telegramId: ticket.telegramId,
+      },
+    };
+  }
+
+  /**
+   * POST /tickets/buy-batch
+   * Purchase multiple cards at once in the active game.
+   * Body: { telegramId: string; cardNumbers: number[] }
+   */
+  @Post('buy-batch')
+  async buyTicketBatch(
+    @Body() body: { telegramId: string; cardNumbers: number[] },
+  ) {
+    const tickets = await this.ticketsService.buyTicketBatch(body.telegramId, body.cardNumbers);
+    return {
+      success: true,
+      tickets: tickets.map((ticket) => ({
+        id: ticket._id.toString(),
+        gameId: ticket.gameId.toString(),
+        cardNumber: ticket.cardNumber,
+        pricePaid: ticket.pricePaid,
+        telegramId: ticket.telegramId,
+      })),
+    };
   }
 
   /**
@@ -45,12 +77,38 @@ export class TicketsController {
   }
 
   /**
+   * GET /tickets/mine?telegramId=xxx
+   * ALL tickets the user holds in the current active game (array).
+   */
+  @Get('mine')
+  async getMyTickets(@Query('telegramId') telegramId: string) {
+    const tickets = await this.ticketsService.getMyTicketsInActiveGame(telegramId);
+    return tickets.map((t) => ({
+      id: t._id.toString(),
+      gameId: t.gameId.toString(),
+      cardNumber: t.cardNumber,
+      pricePaid: t.pricePaid,
+      telegramId: t.telegramId,
+      isWinner: t.isWinner,
+    }));
+  }
+
+  /**
    * GET /tickets/me?telegramId=xxx
-   * The ticket (if any) the user holds in the current active game.
+   * First ticket the user holds (backward compat).
    */
   @Get('me')
   async getMyTicket(@Query('telegramId') telegramId: string) {
-    return this.ticketsService.getMyTicketInActiveGame(telegramId);
+    const ticket = await this.ticketsService.getMyTicketInActiveGame(telegramId);
+    if (!ticket) return null;
+    return {
+      id: ticket._id.toString(),
+      gameId: ticket.gameId.toString(),
+      cardNumber: ticket.cardNumber,
+      pricePaid: ticket.pricePaid,
+      telegramId: ticket.telegramId,
+      isWinner: ticket.isWinner,
+    };
   }
 
   /**

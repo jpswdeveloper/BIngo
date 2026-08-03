@@ -17,6 +17,7 @@ import { checkWin, findWinnerAmongCards } from './utils/win-checker';
 import { CardsService } from '../cards/cards.service';
 import { BingoGateway } from '../socket/bingo.gateway';
 import { CreateGameDto } from './dto/create-game.dto';
+import { UsersService } from '../users/users.service';
 
 /** Shape of the hot game state cached in Redis */
 export interface GameStateCache {
@@ -28,6 +29,7 @@ export interface GameStateCache {
   drawnNumbers: number[];
   currentDraw: number | null;
   countdownSeconds: number;
+  countdownStartedAt: number | null;
   drawIntervalSeconds: number;
   /** Card numbers that have been sold */
   soldCardNumbers: number[];
@@ -47,6 +49,7 @@ export class GameService {
     private readonly ticketModel: Model<TicketDocument>,
     private readonly redisService: RedisService,
     private readonly cardsService: CardsService,
+    private readonly usersService: UsersService,
     @Inject(forwardRef(() => BingoGateway))
     private readonly gateway: BingoGateway,
   ) {}
@@ -88,6 +91,7 @@ export class GameService {
   ): Promise<GameDocument> {
     const existing = await this.gameModel
       .findOne({ phase: { $ne: GamePhase.GAME_OVER } })
+      .sort({ createdAt: -1 })
       .exec();
 
     if (existing) {
@@ -130,6 +134,7 @@ export class GameService {
       drawnNumbers: [],
       currentDraw: null,
       countdownSeconds: game.countdownSeconds,
+      countdownStartedAt: game.countdownStartedAt ? game.countdownStartedAt.getTime() : null,
       drawIntervalSeconds: game.drawIntervalSeconds,
       soldCardNumbers: [],
     };
@@ -143,11 +148,64 @@ export class GameService {
   }
 
   /**
+   * Start CARD_SELECTION phase timer (purchasing phase).
+   */
+  async startPurchasingPhase(gameId: string): Promise<GameStateCache> {
+    const game = await this.requireGame(gameId, GamePhase.CARD_SELECTION);
+    
+    game.countdownStartedAt = new Date();
+    await game.save();
+
+    const state = await this.buildAndCacheState(game);
+
+    this.logger.log(`Game ${game.gameCode} started CARD_SELECTION (${game.purchasingSeconds}s)`);
+    this.gateway.broadcastPhaseChange(state);
+
+    const timer = setTimeout(async () => {
+      try {
+        await this.startCountdown(gameId);
+      } catch (err) {
+        this.logger.error(`startCountdown timer error for game ${gameId}:`, err);
+      }
+    }, game.purchasingSeconds * 1000);
+
+    this.countdownTimers.set(gameId, timer);
+
+    return state;
+  }
+
+  /**
    * CARD_SELECTION → COUNTDOWN
    * Stops card sales and starts the countdown timer.
    */
   async startCountdown(gameId: string): Promise<GameStateCache> {
+    this.clearTimer(this.countdownTimers, gameId);
+
     const game = await this.requireGame(gameId, GamePhase.CARD_SELECTION);
+
+    // Guard: count sold tickets. Use the same query as buildAndCacheState
+    // (distinct cardNumber) to avoid ObjectId type mismatch with countDocuments.
+    const soldFromDb = await this.ticketModel
+      .distinct('cardNumber', { gameId: game._id })
+      .exec();
+    const soldCountDb = soldFromDb.length;
+
+    // Also check Redis in case DB query has a timing quirk
+    const cachedState = await this.getCachedState(gameId);
+    const soldCountRedis = cachedState?.soldCardNumbers?.length ?? 0;
+
+    const soldCount = Math.max(soldCountDb, soldCountRedis);
+
+    this.logger.log(
+      `Game ${game.gameCode}: startCountdown — soldCountDb=${soldCountDb}, soldCountRedis=${soldCountRedis}, using=${soldCount}`,
+    );
+
+    if (soldCount === 0) {
+      this.logger.warn(
+        `Game ${game.gameCode}: purchasing phase ended with 0 sold cards — cancelling game.`,
+      );
+      return this.endGame(gameId, null, null);
+    }
 
     game.phase = GamePhase.COUNTDOWN;
     game.countdownStartedAt = new Date();
@@ -162,7 +220,11 @@ export class GameService {
 
     // Automatically transition to DRAWING after countdown expires
     const timer = setTimeout(async () => {
-      await this.startDrawing(gameId);
+      try {
+        await this.startDrawing(gameId);
+      } catch (err) {
+        this.logger.error(`startDrawing timer error for game ${gameId}:`, err);
+      }
     }, game.countdownSeconds * 1000);
 
     this.countdownTimers.set(gameId, timer);
@@ -173,12 +235,32 @@ export class GameService {
   /**
    * COUNTDOWN → DRAWING
    * Kicks off the automatic draw loop.
+   * Guards: requires at least 1 sold card before drawing starts.
    */
   async startDrawing(gameId: string): Promise<GameStateCache> {
-    // Clear countdown timer in case this was called manually
     this.clearTimer(this.countdownTimers, gameId);
 
     const game = await this.requireGame(gameId, GamePhase.COUNTDOWN);
+
+    // ── Guard: no sold cards → cancel game instead of drawing ──
+    const soldFromDb2 = await this.ticketModel
+      .distinct('cardNumber', { gameId: game._id })
+      .exec();
+    const soldCountDb = soldFromDb2.length;
+    const cachedState2 = await this.getCachedState(gameId);
+    const soldCountRedis2 = cachedState2?.soldCardNumbers?.length ?? 0;
+    const soldCount = Math.max(soldCountDb, soldCountRedis2);
+
+    this.logger.log(
+      `Game ${game.gameCode}: startDrawing — soldCountDb=${soldCountDb}, soldCountRedis=${soldCountRedis2}, using=${soldCount}`,
+    );
+
+    if (soldCount === 0) {
+      this.logger.warn(
+        `Game ${game.gameCode}: countdown ended with 0 sold cards — cancelling game.`,
+      );
+      return this.endGame(gameId, null, null);
+    }
 
     game.phase = GamePhase.DRAWING;
     game.drawingStartedAt = new Date();
@@ -186,10 +268,9 @@ export class GameService {
 
     const state = await this.buildAndCacheState(game);
 
-    this.logger.log(`Game ${game.gameCode} → DRAWING`);
+    this.logger.log(`Game ${game.gameCode} → DRAWING (${soldCount} cards sold)`);
     this.gateway.broadcastPhaseChange(state);
 
-    // Kick off the first draw immediately
     await this.scheduleNextDraw(gameId, game.drawIntervalSeconds);
 
     return state;
@@ -245,11 +326,18 @@ export class GameService {
       return { valid: false, message: 'Game is not in DRAWING phase.' };
     }
 
-    // Confirm this user actually owns this card in this game
+    // Use telegramId-based lookup to avoid ObjectId type mismatch.
+    // userId passed from FE is the internal user _id string.
+    // Find the user's telegramId first, then look up the ticket by telegramId.
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      return { valid: false, message: 'User not found.' };
+    }
+
     const ticket = await this.ticketModel
       .findOne({
         gameId: new Types.ObjectId(gameId),
-        userId: new Types.ObjectId(userId),
+        telegramId: user.telegramId,
         cardNumber,
       })
       .exec();
@@ -310,6 +398,22 @@ export class GameService {
           { $set: { isWinner: true } },
         )
         .exec();
+
+      // ── Payout: total pot goes to winner ──────────────────────
+      const totalTickets = await this.ticketModel
+        .countDocuments({ gameId: new Types.ObjectId(gameId) })
+        .exec();
+      const pot = totalTickets * game.ticketPrice;
+
+      const winner = await this.usersService.findById(winnerId);
+      await this.usersService.updateWalletBalance(
+        winnerId,
+        winner.walletBalance + pot,
+      );
+
+      this.logger.log(
+        `Paid out ${pot} ETB to winner ${winnerId} (card #${winningCardNumber})`,
+      );
     }
 
     const state = await this.buildAndCacheState(game);
@@ -345,9 +449,82 @@ export class GameService {
   //  Read
   // ─────────────────────────────────────────────────────────────
 
+  // ─────────────────────────────────────────────────────────────
+  //  joinOrCreateGame — called by frontend stake click
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * If a non-finished game already exists, return it.
+   * If not, create a new one with the requested ticketPrice
+   * and sensible defaults (30s countdown, 5s draw interval, FULL_HOUSE).
+   */
+  async joinOrCreateGame(
+    ticketPrice: number,
+    adminId: string,
+  ): Promise<{ gameId: string; gameCode: string; phase: GamePhase; ticketPrice: number }> {
+    // Check for any active game first (regardless of stake)
+    const existing = await this.gameModel
+      .findOne({ phase: { $ne: GamePhase.GAME_OVER } })
+      .sort({ createdAt: -1 })
+      .exec();
+
+    if (existing) {
+      // Ensure Redis state is warm
+      let state = await this.getCachedState(existing._id.toString());
+      if (!state) state = await this.buildAndCacheState(existing);
+      return {
+        gameId: existing._id.toString(),
+        gameCode: existing.gameCode,
+        phase: existing.phase,
+        ticketPrice: existing.ticketPrice,
+      };
+    }
+
+    // No active game — create one
+    const cardsReady = await this.cardsService.hasCardsGenerated();
+    if (!cardsReady) {
+      throw new BadRequestException(
+        'Cards have not been generated yet. Run POST /cards/generate first.',
+      );
+    }
+
+    const gameCode = await this.generateGameCode();
+    const game = new this.gameModel({
+      gameCode,
+      phase: GamePhase.CARD_SELECTION,
+      ticketPrice: ticketPrice ?? 10,
+      purchasingSeconds: 30, // 30s for purchasing
+      countdownSeconds: 10, // 10s buffer before drawing starts
+      drawIntervalSeconds: 5,
+      winPattern: WinPattern.FULL_HOUSE,
+      drawnNumbers: [],
+      currentDraw: null,
+      winnerId: null,
+      winningCardNumber: null,
+      createdBy: new Types.ObjectId('6a69e830f52b7714849bad3d'), // Yo (admin)
+    });
+
+    await game.save();
+
+    // Automatically start purchasing timer
+    const state = await this.startPurchasingPhase(game._id.toString());
+
+    this.logger.log(`Auto-created game ${gameCode} with ticketPrice=${ticketPrice} ETB and started purchasing phase.`);
+
+    return {
+      gameId: game._id.toString(),
+      gameCode: game.gameCode,
+      phase: state.phase,
+      ticketPrice: state.ticketPrice,
+    };
+  }
+
   async getActiveGame(): Promise<GameStateCache | null> {
+    // Sort by newest first — ensures we always get the most recent active game,
+    // not a stale one from a previous session that wasn't properly ended.
     const game = await this.gameModel
       .findOne({ phase: { $ne: GamePhase.GAME_OVER } })
+      .sort({ createdAt: -1 })
       .exec();
 
     if (!game) return null;
@@ -399,6 +576,10 @@ export class GameService {
       .distinct('cardNumber')
       .exec();
 
+    const currentCountdownSeconds = game.phase === GamePhase.CARD_SELECTION 
+      ? game.purchasingSeconds 
+      : game.countdownSeconds;
+
     const state: GameStateCache = {
       gameId: game._id.toString(),
       gameCode: game.gameCode,
@@ -407,7 +588,8 @@ export class GameService {
       winPattern: game.winPattern,
       drawnNumbers: game.drawnNumbers,
       currentDraw: game.currentDraw,
-      countdownSeconds: game.countdownSeconds,
+      countdownSeconds: currentCountdownSeconds,
+      countdownStartedAt: game.countdownStartedAt ? game.countdownStartedAt.getTime() : null,
       drawIntervalSeconds: game.drawIntervalSeconds,
       soldCardNumbers,
     };
@@ -449,8 +631,10 @@ export class GameService {
     state: GameStateCache,
   ): Promise<void> {
     if (state.soldCardNumbers.length === 0) {
-      // No players — keep drawing
-      await this.scheduleNextDraw(game._id.toString(), game.drawIntervalSeconds);
+      this.logger.warn(
+        `Game ${game.gameCode}: drawing with 0 sold cards — ending game.`,
+      );
+      await this.endGame(game._id.toString(), null, null);
       return;
     }
 

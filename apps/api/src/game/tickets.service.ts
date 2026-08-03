@@ -52,7 +52,7 @@ export class TicketsService {
     if (!state) {
       throw new NotFoundException('No active game found.');
     }
-    if (state.phase !== GamePhase.CARD_SELECTION) {
+    if (state.phase !== GamePhase.CARD_SELECTION && state.phase !== GamePhase.COUNTDOWN) {
       throw new BadRequestException(
         `Card purchases are closed. Game is in ${state.phase} phase.`,
       );
@@ -86,13 +86,13 @@ export class TicketsService {
       );
     }
 
-    // 5. One ticket per player per game
-    const alreadyHasTicket = await this.ticketModel
-      .findOne({ gameId: gameObjectId, userId: userObjectId })
+    // 5. Allow multiple cards per user — just check this specific card isn't already taken
+    const cardTakenByThisUser = await this.ticketModel
+      .findOne({ gameId: gameObjectId, userId: userObjectId, cardNumber })
       .exec();
-    if (alreadyHasTicket) {
+    if (cardTakenByThisUser) {
       throw new ConflictException(
-        `You already hold card #${alreadyHasTicket.cardNumber} in this game.`,
+        `You already own card #${cardNumber} in this game.`,
       );
     }
 
@@ -121,14 +121,74 @@ export class TicketsService {
     });
     await ticket.save();
 
-    // Update Redis sold list
+    // Update Redis sold list FIRST
     await this.gameService.markCardSold(state.gameId, cardNumber);
+
+    // The countdown is now started automatically when the game lobby is created,
+    // so we don't need to trigger it here on the first ticket sold.
 
     this.logger.log(
       `User ${telegramId} purchased card #${cardNumber} in game ${state.gameCode}`,
     );
 
     return ticket;
+  }
+
+  async buyTicketBatch(
+    telegramId: string,
+    cardNumbers: number[],
+  ): Promise<TicketDocument[]> {
+    if (!cardNumbers.length) return [];
+
+    const state = await this.gameService.getActiveGame();
+    if (!state) throw new NotFoundException('No active game found.');
+    if (state.phase !== GamePhase.CARD_SELECTION && state.phase !== GamePhase.COUNTDOWN) {
+      throw new BadRequestException(`Card purchases are closed.`);
+    }
+
+    const user = await this.usersService.findByTelegramId(telegramId);
+    if (!user) throw new NotFoundException('User not found.');
+    if (user.isBlocked) throw new BadRequestException('Your account is blocked.');
+
+    const price = state.ticketPrice;
+    const totalCost = price * cardNumbers.length;
+    if (user.walletBalance < totalCost) {
+      throw new BadRequestException(`Insufficient balance for ${cardNumbers.length} cards.`);
+    }
+
+    const gameObjectId = new Types.ObjectId(state.gameId);
+    const userObjectId = user._id as Types.ObjectId;
+
+    // Validate availability
+    for (const cardNumber of cardNumbers) {
+      if (cardNumber < 1 || cardNumber > 600) {
+        throw new BadRequestException('Invalid card number.');
+      }
+      const taken = await this.ticketModel.findOne({ gameId: gameObjectId, cardNumber }).exec();
+      if (taken) throw new ConflictException(`Card #${cardNumber} is already taken.`);
+    }
+
+    // Deduct wallet (atomically increment by negative value if possible, or just set)
+    await this.usersService.updateWalletBalance(user._id.toString(), user.walletBalance - totalCost);
+
+    const tickets: TicketDocument[] = [];
+    for (const cardNumber of cardNumbers) {
+      const ticket = new this.ticketModel({
+        gameId: gameObjectId,
+        userId: userObjectId,
+        telegramId,
+        cardNumber,
+        pricePaid: price,
+        isWinner: false,
+      });
+      await ticket.save();
+      tickets.push(ticket);
+      await this.gameService.markCardSold(state.gameId, cardNumber);
+    }
+
+    // The countdown is now started automatically when the game lobby is created.
+
+    return tickets;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -174,7 +234,37 @@ export class TicketsService {
   }
 
   /**
+   * All tickets a specific user holds in the current active game.
+   */
+  async getMyTicketsInActiveGame(
+    telegramId: string,
+  ): Promise<TicketDocument[]> {
+    const state = await this.gameService.getActiveGame();
+    if (!state) {
+      this.logger.warn(`getMyTicketsInActiveGame: no active game for telegramId=${telegramId}`);
+      return [];
+    }
+
+    // Query by telegramId (plain string) + gameId rather than userId (ObjectId).
+    // This avoids a bson version mismatch where stored userId ObjectIds don't
+    // compare equal to freshly constructed Types.ObjectId instances.
+    const tickets = await this.ticketModel
+      .find({
+        gameId: new Types.ObjectId(state.gameId),
+        telegramId,
+      })
+      .exec();
+
+    this.logger.log(
+      `getMyTicketsInActiveGame: telegramId=${telegramId}, gameId=${state.gameId}, phase=${state.phase}, found=${tickets.length} tickets`,
+    );
+
+    return tickets;
+  }
+
+  /**
    * The ticket a specific user holds in the current active game, if any.
+   * Returns the FIRST ticket (for backward compat).
    */
   async getMyTicketInActiveGame(
     telegramId: string,
@@ -182,13 +272,10 @@ export class TicketsService {
     const state = await this.gameService.getActiveGame();
     if (!state) return null;
 
-    const user = await this.usersService.findByTelegramId(telegramId);
-    if (!user) return null;
-
     return this.ticketModel
       .findOne({
         gameId: new Types.ObjectId(state.gameId),
-        userId: user._id as Types.ObjectId,
+        telegramId,
       })
       .exec();
   }
@@ -225,7 +312,7 @@ export class TicketsService {
    */
   async isCardAvailable(cardNumber: number): Promise<boolean> {
     const state = await this.gameService.getActiveGame();
-    if (!state || state.phase !== GamePhase.CARD_SELECTION) return false;
+    if (!state || (state.phase !== GamePhase.CARD_SELECTION && state.phase !== GamePhase.COUNTDOWN)) return false;
     return !state.soldCardNumbers.includes(cardNumber);
   }
 }

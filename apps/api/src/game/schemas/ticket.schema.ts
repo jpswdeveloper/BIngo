@@ -4,9 +4,7 @@ import { HydratedDocument, Types } from 'mongoose';
 export type TicketDocument = HydratedDocument<Ticket>;
 
 @Schema({
-  timestamps: {
-    currentTime: () => Date.now() + 3 * 60 * 60 * 1000,
-  },
+  timestamps: true,
   collection: 'tickets',
 })
 export class Ticket {
@@ -36,9 +34,6 @@ export class Ticket {
 }
 
 export const TicketSchema = SchemaFactory.createForClass(Ticket);
-
-// One player can hold at most one card per game
-TicketSchema.index({ gameId: 1, userId: 1 }, { unique: true });
 
 // One card can be owned by at most one player per game
 TicketSchema.index({ gameId: 1, cardNumber: 1 }, { unique: true });

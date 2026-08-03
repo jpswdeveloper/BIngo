@@ -4,24 +4,24 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
-import { APP_TIMEZONE_OFFSET, DateService } from '@app/common';
+} from "@nestjs/common";
+import { InjectModel } from "@nestjs/mongoose";
+import { Model, Types } from "mongoose";
+import { APP_TIMEZONE_OFFSET, DateService } from "@app/common";
 import {
   PaymentIntent,
   PaymentIntentDocument,
   PaymentStatus,
   PaymentType,
-} from './schema/payment.schema';
+} from "./schema/payment.schema";
 import {
   TransactionHistory,
   TransactionHistoryDocument,
   TransactionType,
-} from './schema/transaction.schema';
-import { UsersService } from '../users/users.service';
-import { CreateDepositIntentDto } from './dto/payment-history.dto';
-import { TelebirrScraperService } from './telebirr.service';
+} from "./schema/transaction.schema";
+import { UsersService } from "../users/users.service";
+import { CreateDepositIntentDto } from "./dto/payment-history.dto";
+import { TelebirrScraperService } from "./telebirr.service";
 
 @Injectable()
 export class PaymentsService {
@@ -29,10 +29,9 @@ export class PaymentsService {
 
   // Define target merchant/agent phone number (or get from process.env.TELEBIRR_RECEIVER_NUMBER)
   private readonly TARGET_RECEIVER_NUMBER =
-    process.env.TELEBIRR_RECEIVER_NUMBER || '251911223344';
+    process.env.TELEBIRR_RECEIVER_NUMBER!;
 
-  private readonly TARGET_RECEIVER_NAME =
-    process.env.TELEBIRR_RECEIVER_NAME || 'YOHANES ESHETU HAILSELASE';
+  private readonly TARGET_RECEIVER_NAME = process.env.TELEBIRR_RECEIVER_NAME!;
 
   constructor(
     @InjectModel(PaymentIntent.name)
@@ -49,15 +48,15 @@ export class PaymentsService {
    * e.g., "+251911223344", "0911223344", "251911223344" -> "911223344"
    */
   private normalizePhoneNumber(phone: string): string {
-    return phone.replace(/\D/g, '').slice(-9);
+    return phone.replace(/\D/g, "").slice(-9);
   }
 
   private isMaskedPhoneNumber(phone: string): boolean {
-    return phone.includes('*');
+    return phone.includes("*");
   }
 
   private normalizeMaskedPhoneNumber(phone: string): string {
-    return phone.replace(/\D/g, '');
+    return phone.replace(/\D/g, "");
   }
 
   private doesPhoneNumberMatch(
@@ -89,7 +88,7 @@ export class PaymentsService {
   private parseReceiptDate(receiptDate?: string): Date | null {
     if (!receiptDate) return null;
 
-    const trimmed = receiptDate.trim().replace(/\s+/g, ' ');
+    const trimmed = receiptDate.trim().replace(/\s+/g, " ");
     const fullMatch = trimmed.match(
       /(\d{2})[\/\-](\d{2})[\/\-](\d{4})\s+(\d{2}):(\d{2}):(\d{2})/,
     );
@@ -129,7 +128,7 @@ export class PaymentsService {
     dto: CreateDepositIntentDto,
   ): Promise<PaymentIntentDocument> {
     if (dto.expectedAmount < 10) {
-      throw new BadRequestException('Minimum deposit amount is 10 ETB.');
+      throw new BadRequestException("Minimum deposit amount is 10 ETB.");
     }
     const user = await this.usersService.findByTelegramId(dto.telegramId);
     if (!user) {
@@ -151,7 +150,7 @@ export class PaymentsService {
       telegramId: dto.telegramId,
       type: PaymentType.DEPOSIT,
       expectedAmount: dto.expectedAmount,
-      paymentMethod: dto.paymentMethod || 'Telebirr',
+      paymentMethod: dto.paymentMethod || "Telebirr",
       status: PaymentStatus.AWAITING_RECEIPT,
     });
 
@@ -185,7 +184,7 @@ export class PaymentsService {
     if (!intent) {
       return {
         success: false,
-        message: '⚠️ አልተገኘም። እባክዎ አስቀድመው /deposit ብለው የገንዘብ መጠን ያስገቡ።',
+        message: "⚠️ አልተገኘም። እባክዎ አስቀድመው /deposit ብለው የገንዘብ መጠን ያስገቡ።",
       };
     }
 
@@ -199,9 +198,9 @@ export class PaymentsService {
       await intent.save();
 
       const errorMessage =
-        scrapeResult.error === 'invalid_sms_format'
-          ? '⚠️ ደረሰኙ የማረጋገጫ ሊንክ (https://transactioninfo...) አልያዘም። ደረሰኙ ለአስተዳዳሪው (Admin) ተልኳል::'
-          : '⚠️ የቴሌብር ማረጋገጫ ገጹን መክፈት አልተቻለም። ደረሰኙ ለአስተዳዳሪው (Admin) ተልኳል::';
+        scrapeResult.error === "invalid_sms_format"
+          ? "⚠️ ደረሰኙ የማረጋገጫ ሊንክ (https://transactioninfo...) አልያዘም። ደረሰኙ ለአስተዳዳሪው (Admin) ተልኳል::"
+          : "⚠️ የቴሌብር ማረጋገጫ ገጹን መክፈት አልተቻለም። ደረሰኙ ለአስተዳዳሪው (Admin) ተልኳል::";
 
       return {
         success: false,
@@ -226,7 +225,7 @@ export class PaymentsService {
       return {
         success: false,
         message:
-          '⚠️ የክፍያ መረጃ ማግኘት አልተቻለም። አስተዳዳሪው (Admin) እስኪያረጋግጥልዎ ድረስ እባክዎ ትንሽ ይጠብቁ::',
+          "⚠️ የክፍያ መረጃ ማግኘት አልተቻለም። አስተዳዳሪው (Admin) እስኪያረጋግጥልዎ ድረስ እባክዎ ትንሽ ይጠብቁ::",
       };
     }
 
@@ -249,7 +248,7 @@ export class PaymentsService {
       return {
         success: false,
         message:
-          '⚠️ የክፍያ የማረጋገጫ ጊዜ ከየገንዘብ መጠን ግዜ 5 ደቂቃዎች ውስጥ አይደለም። እባክዎ ወደ ደጋፊ ቡድን ይደውሉ።',
+          "⚠️ የክፍያ የማረጋገጫ ጊዜ ከየገንዘብ መጠን ግዜ 5 ደቂቃዎች ውስጥ አይደለም። እባክዎ ወደ ደጋፊ ቡድን ይደውሉ።",
       };
     }
 
@@ -260,12 +259,12 @@ export class PaymentsService {
           this.TARGET_RECEIVER_NUMBER,
         )
       : false;
-    const isNameMatch = this.doesReceiverNameMatch(creditedPartyName || '');
+    const isNameMatch = this.doesReceiverNameMatch(creditedPartyName || "");
 
     if (!isPhoneMatch || !isNameMatch) {
       return {
         success: false,
-        message: `⚠️ ይህ ክፍያ ወደ ትክክለኛው ቁጥር ወይም ስም አልተላከም (${creditedPartyName || 'unknown'} | ${creditedPartyNumber || 'unknown'}). እባክዎ ወደ **${this.TARGET_RECEIVER_NAME}** / **${this.TARGET_RECEIVER_NUMBER}** መላክዎን ያረጋግጡ::`,
+        message: `⚠️ ይህ ክፍያ ወደ ትክክለኛው ቁጥር ወይም ስም አልተላከም (${creditedPartyName || "unknown"} | ${creditedPartyNumber || "unknown"}). እባክዎ ወደ **${this.TARGET_RECEIVER_NAME}** / **${this.TARGET_RECEIVER_NUMBER}** መላክዎን ያረጋግጡ::`,
       };
     }
 
@@ -277,7 +276,7 @@ export class PaymentsService {
 
     if (existingTxn) {
       throw new ConflictException(
-        '❌ ይህ የትራንዛክሽን ቁጥር (Transaction ID) ቀደም ብሎ ስራ ላይ ውሏል!',
+        "❌ ይህ የትራንዛክሽን ቁጥር (Transaction ID) ቀደም ብሎ ስራ ላይ ውሏል!",
       );
     }
 
@@ -326,7 +325,7 @@ export class PaymentsService {
     const resolvedUserId = this.resolveUserId(userId);
 
     const user = await this.usersService.findById(resolvedUserId);
-    if (!user) throw new NotFoundException('User not found');
+    if (!user) throw new NotFoundException("User not found");
 
     const balanceBefore = user.walletBalance || 0;
     const balanceAfter = balanceBefore + amount;
@@ -357,11 +356,11 @@ export class PaymentsService {
       return id;
     }
 
-    if (typeof id === 'string') {
+    if (typeof id === "string") {
       return id;
     }
 
-    if (id && typeof id === 'object') {
+    if (id && typeof id === "object") {
       if (id._id && Types.ObjectId.isValid(id._id)) {
         return id._id;
       }

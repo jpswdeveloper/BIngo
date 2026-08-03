@@ -192,11 +192,12 @@ export class BingoGateway
   /** Broadcast a phase change (CARD_SELECTION → COUNTDOWN → DRAWING → GAME_OVER) */
   broadcastPhaseChange(state: GameStateCache) {
     this.toRoom(state.gameId).emit(WS_EVENTS.PHASE_CHANGE, {
-      gameId:          state.gameId,
-      gameCode:        state.gameCode,
-      phase:           state.phase,
-      countdownSeconds: state.countdownSeconds,
-      timestamp:       Date.now(),
+      gameId:             state.gameId,
+      gameCode:           state.gameCode,
+      phase:              state.phase,
+      countdownSeconds:   state.countdownSeconds,
+      countdownStartedAt: state.countdownStartedAt, // ← FE needs this to compute time remaining
+      timestamp:          Date.now(),
     });
   }
 

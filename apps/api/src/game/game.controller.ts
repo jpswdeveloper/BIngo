@@ -17,9 +17,24 @@ export class GameController {
   constructor(private readonly gameService: GameService) {}
 
   /**
+   * POST /games/join
+   * Called by the frontend when a user clicks a stake.
+   * - If no active game exists for that ticketPrice, creates one
+   * - If a game already exists (any phase), returns it
+   * Returns: { gameId, gameCode, phase, ticketPrice }
+   */
+  @Post('join')
+  @HttpCode(HttpStatus.OK)
+  async joinOrCreate(
+    @Body() body: { ticketPrice: number; adminId?: string },
+  ) {
+    const adminId = body.adminId ?? 'system';
+    return this.gameService.joinOrCreateGame(body.ticketPrice, adminId);
+  }
+
+  /**
    * POST /games
    * Create a new game in CARD_SELECTION phase.
-   * Body: { ticketPrice?, countdownSeconds?, drawIntervalSeconds?, winPattern? }
    */
   @Post()
   async createGame(
