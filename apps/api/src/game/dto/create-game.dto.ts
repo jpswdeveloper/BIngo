@@ -7,12 +7,21 @@ export class CreateGameDto {
   @Min(1)
   ticketPrice?: number;
 
+  /** Seconds players have to purchase cards (CARD_SELECTION phase) */
   @IsOptional()
   @IsInt()
   @Min(10)
   @Max(300)
+  purchasingSeconds?: number;
+
+  /** Seconds between purchasing ending and first draw (COUNTDOWN phase) */
+  @IsOptional()
+  @IsInt()
+  @Min(5)
+  @Max(120)
   countdownSeconds?: number;
 
+  /** Seconds between each number draw (DRAWING phase) */
   @IsOptional()
   @IsInt()
   @Min(2)
