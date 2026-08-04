@@ -210,4 +210,36 @@ export class UsersService {
 
     return user;
   }
+
+  /** Add amount to mainWallet (winnings). Uses $inc for atomicity. */
+  async creditMainWallet(userId: string, amount: number): Promise<UserDocument> {
+    const user = await this.userModel
+      .findByIdAndUpdate(
+        userId,
+        { $inc: { mainWallet: amount } },
+        { returnDocument: 'after' },
+      )
+      .exec();
+
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+    return user;
+  }
+
+  /** Deduct amount from mainWallet (cashout deduction). Fails if insufficient. */
+  async debitMainWallet(userId: string, amount: number): Promise<UserDocument> {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+    if (user.mainWallet < amount) {
+      throw new BadRequestException(
+        `Insufficient main wallet balance. Have ${user.mainWallet} ETB, need ${amount} ETB.`,
+      );
+    }
+    return this.userModel
+      .findByIdAndUpdate(
+        userId,
+        { $inc: { mainWallet: -amount } },
+        { returnDocument: 'after' },
+      )
+      .exec() as Promise<UserDocument>;
+  }
 }
