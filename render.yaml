@@ -1,0 +1,45 @@
+services:
+  # ─── NestJS API ───────────────────────────────────────────────
+  - type: web
+    name: bingo-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: APP_TIMEZONE
+        value: Africa/Nairobi
+
+      # MongoDB Atlas connection string — set in dashboard
+      - key: MONGODB_URI
+        sync: false
+
+      # Auto-wired from the Redis service below
+      - key: REDIS_URL
+        fromService:
+          name: bingo-redis
+          type: redis
+          property: connectionString
+
+      # Set these manually in the Render dashboard
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEBIRR_RECEIVER_NUMBER
+        sync: false
+      - key: TELEBIRR_RECEIVER_NAME
+        sync: false
+      - key: WEBAPP_URL
+        sync: false
+
+  # ─── Redis ────────────────────────────────────────────────────
+  - type: redis
+    name: bingo-redis
+    region: oregon
+    plan: free
+    ipAllowList: []           # only internal Render network access
+    maxmemoryPolicy: noeviction

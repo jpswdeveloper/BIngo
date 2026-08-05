@@ -1,0 +1,15 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+.env.*
+*.md
+coverage
+.nyc_output
+docker-compose.yml
+Dockerfile
+.dockerignore
+apps/api/test
+**/*.spec.ts
+**/*.e2e-spec.ts
