@@ -18,6 +18,7 @@ import { CardsService } from '../cards/cards.service';
 import { BingoGateway } from '../socket/bingo.gateway';
 import { CreateGameDto } from './dto/create-game.dto';
 import { UsersService } from '../users/users.service';
+import { SettingsService } from '../settings/settings.service';
 
 /** Shape of the hot game state cached in Redis */
 export interface GameStateCache {
@@ -50,6 +51,7 @@ export class GameService {
     private readonly redisService: RedisService,
     private readonly cardsService: CardsService,
     private readonly usersService: UsersService,
+    private readonly settingsService: SettingsService,
     @Inject(forwardRef(() => BingoGateway))
     private readonly gateway: BingoGateway,
   ) {}
@@ -205,7 +207,7 @@ export class GameService {
       this.logger.warn(
         `Game ${game.gameCode}: purchasing phase ended with 0 sold cards — cancelling game.`,
       );
-      return this.endGame(gameId, null, null);
+      return this.endGame(gameId, []);
     }
 
     game.phase = GamePhase.COUNTDOWN;
@@ -260,7 +262,7 @@ export class GameService {
       this.logger.warn(
         `Game ${game.gameCode}: countdown ended with 0 sold cards — cancelling game.`,
       );
-      return this.endGame(gameId, null, null);
+      return this.endGame(gameId, []);
     }
 
     game.phase = GamePhase.DRAWING;
@@ -290,7 +292,7 @@ export class GameService {
       this.logger.warn(
         `Game ${game.gameCode}: all 75 numbers drawn with no winner — ending game.`,
       );
-      return this.endGame(gameId, null, null);
+      return this.endGame(gameId, []);
     }
 
     // Pick a random number from the remaining pool
@@ -363,18 +365,23 @@ export class GameService {
 
     // Valid win — stop the draw loop and end the game
     this.clearTimer(this.drawTimers, gameId);
-    await this.endGame(gameId, userId, cardNumber);
+    await this.endGame(gameId, [{ userId, cardNumber }]);
 
     return { valid: true, message: 'BINGO confirmed!' };
   }
 
   /**
-   * Transition to GAME_OVER, mark winner (if any), broadcast final state.
+   * Transition to GAME_OVER.
+   * - Computes rake from dynamic tiers (SettingsService)
+   * - Splits remaining prize equally among all winners
+   * - Credits each winner's mainWallet (not gameBalance)
+   * - Supports multiple simultaneous winners
+   *
+   * winnerCards: array of { userId, cardNumber } — pass empty array for no winners.
    */
   async endGame(
     gameId: string,
-    winnerId: string | null,
-    winningCardNumber: number | null,
+    winnerCards: { userId: string | null; cardNumber: number }[],
   ): Promise<GameStateCache> {
     this.clearTimer(this.drawTimers, gameId);
     this.clearTimer(this.countdownTimers, gameId);
@@ -382,52 +389,72 @@ export class GameService {
     const game = await this.gameModel.findById(gameId).exec();
     if (!game) throw new NotFoundException(`Game ${gameId} not found`);
 
+    // ── Compute prize pool ─────────────────────────────────────
+    const soldCount = await this.ticketModel
+      .distinct('cardNumber', { gameId: game._id })
+      .exec()
+      .then((r) => r.length);
+
+    const totalPot = soldCount * game.ticketPrice;
+    const rakePct  = await this.settingsService.getRakePct(soldCount);
+    const adminCut = Math.floor(totalPot * rakePct) / 100;
+    const prizePool = totalPot - adminCut;
+
+    this.logger.log(
+      `Game ${game.gameCode}: pot=${totalPot} ETB, rake=${rakePct}% (${adminCut} ETB), prizePool=${prizePool} ETB`,
+    );
+
+    // ── Resolve winners (filter out null userIds) ──────────────
+    const validWinners = winnerCards.filter((w) => !!w.userId);
+    const perWinnerPrize = validWinners.length > 0
+      ? Math.floor((prizePool / validWinners.length) * 100) / 100
+      : 0;
+
+    // ── Update game document ───────────────────────────────────
     game.phase = GamePhase.GAME_OVER;
     game.endedAt = new Date();
-    game.winnerId = winnerId ? new Types.ObjectId(winnerId) : null;
-    game.winningCardNumber = winningCardNumber;
+    // Store first winner for backward compat on existing fields
+    game.winnerId = validWinners[0]?.userId
+      ? new Types.ObjectId(validWinners[0].userId)
+      : null;
+    game.winningCardNumber = validWinners[0]?.cardNumber ?? null;
     await game.save();
 
-    if (winnerId && winningCardNumber) {
-      await this.ticketModel
-        .findOneAndUpdate(
-          {
-            gameId: new Types.ObjectId(gameId),
-            userId: new Types.ObjectId(winnerId),
-            cardNumber: winningCardNumber,
-          },
-          { $set: { isWinner: true } },
-        )
-        .exec();
+    // ── Mark winning tickets + credit mainWallet ───────────────
+    for (const winner of validWinners) {
+      // Mark ticket
+      await this.ticketModel.findOneAndUpdate(
+        { gameId: game._id, telegramId: { $exists: true }, cardNumber: winner.cardNumber },
+        { $set: { isWinner: true } },
+      ).exec();
 
-      // ── Payout: total pot goes to winner ──────────────────────
-      const totalTickets = await this.ticketModel
-        .countDocuments({ gameId: new Types.ObjectId(gameId) })
-        .exec();
-      const pot = totalTickets * game.ticketPrice;
-
-      const winner = await this.usersService.findById(winnerId);
-      await this.usersService.updateWalletBalance(
-        winnerId,
-        winner.walletBalance + pot,
-      );
+      // Credit mainWallet
+      await this.usersService.creditMainWallet(winner.userId!, perWinnerPrize);
 
       this.logger.log(
-        `Paid out ${pot} ETB to winner ${winnerId} (card #${winningCardNumber})`,
+        `Paid ${perWinnerPrize} ETB to winner userId=${winner.userId} (card #${winner.cardNumber})`,
       );
+    }
+
+    if (validWinners.length === 0) {
+      this.logger.log(`Game ${game.gameCode}: no winners — prize pool forfeited`);
     }
 
     const state = await this.buildAndCacheState(game);
 
     this.logger.log(
-      `Game ${game.gameCode} → GAME_OVER. Winner: card #${winningCardNumber ?? 'none'}`,
+      `Game ${game.gameCode} → GAME_OVER. Winners: ${validWinners.length}, each receives ${perWinnerPrize} ETB`,
     );
-    this.gateway.broadcastGameOver(state, winnerId, winningCardNumber);
 
-    // Keep state in Redis for 10 minutes so late clients can still read it
-    await this.redisService
-      .getClient()
-      .expire(this.redisKey(gameId), 60 * 10);
+    // Broadcast with first winner info for FE overlay
+    this.gateway.broadcastGameOver(
+      state,
+      validWinners[0]?.userId ?? null,
+      validWinners[0]?.cardNumber ?? null,
+    );
+
+    // Keep state in Redis for 10 minutes
+    await this.redisService.getClient().expire(this.redisKey(gameId), 60 * 10);
 
     return state;
   }
@@ -624,50 +651,50 @@ export class GameService {
   }
 
   /**
-   * After each draw, scan all sold cards for a winner.
-   * If found, stop the loop and end the game.
+   * After each draw, scan all sold cards for winners.
+   * All cards that match simultaneously share the prize.
    */
   private async checkAllCardsForWin(
     game: GameDocument,
     state: GameStateCache,
   ): Promise<void> {
     if (state.soldCardNumbers.length === 0) {
-      this.logger.warn(
-        `Game ${game.gameCode}: drawing with 0 sold cards — ending game.`,
-      );
-      await this.endGame(game._id.toString(), null, null);
+      this.logger.warn(`Game ${game.gameCode}: drawing with 0 sold cards — ending game.`);
+      await this.endGame(game._id.toString(), []);
       return;
     }
 
-    // Load card matrices for all sold cards
     const cardDocs = await Promise.all(
       state.soldCardNumbers.map((cn) => this.cardsService.findCardByNumber(cn)),
     );
 
-    const winner = findWinnerAmongCards(
+    const winners = findWinnerAmongCards(
       cardDocs.map((c) => ({ cardNumber: c.cardNumber, matrix: c.matrix })),
       game.drawnNumbers,
       game.winPattern,
     );
 
-    if (winner) {
+    if (winners.length > 0) {
       this.clearTimer(this.drawTimers, game._id.toString());
 
-      // Find which user owns the winning card
-      const ticket = await this.ticketModel
-        .findOne({
-          gameId: game._id,
-          cardNumber: winner.cardNumber,
-        })
-        .exec();
+      // Resolve the userId for each winning card via telegramId-based query
+      const winnerCards: { userId: string | null; cardNumber: number }[] = [];
+      for (const w of winners) {
+        const ticket = await this.ticketModel
+          .findOne({ gameId: game._id, cardNumber: w.cardNumber })
+          .exec();
+        winnerCards.push({
+          userId: ticket?.userId?.toString() ?? null,
+          cardNumber: w.cardNumber,
+        });
+      }
 
-      await this.endGame(
-        game._id.toString(),
-        ticket?.userId?.toString() ?? null,
-        winner.cardNumber,
+      this.logger.log(
+        `Game ${game.gameCode}: ${winners.length} winner(s) found on draw ${game.drawnNumbers.length}`,
       );
+
+      await this.endGame(game._id.toString(), winnerCards);
     } else {
-      // No winner yet — schedule the next draw
       await this.scheduleNextDraw(game._id.toString(), game.drawIntervalSeconds);
     }
   }

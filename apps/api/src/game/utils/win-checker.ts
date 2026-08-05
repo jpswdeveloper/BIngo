@@ -113,19 +113,20 @@ export function checkWin(
 }
 
 /**
- * Scan all tickets in a game and return the first winning card number,
- * or null if no winner yet.
+ * Scan all tickets in a game and return ALL winning card numbers
+ * (multiple winners can occur simultaneously on the same draw).
  */
 export function findWinnerAmongCards(
   cards: { cardNumber: number; matrix: number[] }[],
   drawnNumbers: number[],
   pattern: WinPattern,
-): { cardNumber: number; matchedLine: string } | null {
+): { cardNumber: number; matchedLine: string }[] {
+  const winners: { cardNumber: number; matchedLine: string }[] = [];
   for (const card of cards) {
     const result = checkWin(card.matrix, drawnNumbers, pattern);
     if (result.isWinner) {
-      return { cardNumber: card.cardNumber, matchedLine: result.matchedLine! };
+      winners.push({ cardNumber: card.cardNumber, matchedLine: result.matchedLine! });
     }
   }
-  return null;
+  return winners;
 }

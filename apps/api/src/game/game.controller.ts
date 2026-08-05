@@ -106,6 +106,6 @@ export class GameController {
   @Post(':id/end')
   @HttpCode(HttpStatus.OK)
   async endGame(@Param('id') id: string) {
-    return this.gameService.endGame(id, null, null);
+    return this.gameService.endGame(id, []);
   }
 }

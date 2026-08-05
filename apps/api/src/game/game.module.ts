@@ -10,8 +10,8 @@ import { TicketsController } from './tickets.controller';
 import { CardsModule } from '../cards/cards.module';
 import { UsersModule } from '../users/users.module';
 import { SocketModule } from '../socket/socket.module';
+import { SettingsModule } from '../settings/settings.module';
 
-// Apply the timezone plugin so all Date fields serialise as GMT+3 ISO strings
 GameSchema.plugin(mongooseTimezonePlugin);
 TicketSchema.plugin(mongooseTimezonePlugin);
 
@@ -23,6 +23,7 @@ TicketSchema.plugin(mongooseTimezonePlugin);
     ]),
     CardsModule,
     UsersModule,
+    SettingsModule,
     forwardRef(() => SocketModule),
   ],
   controllers: [GameController, TicketsController],

@@ -5,9 +5,7 @@ import { HydratedDocument, Types } from 'mongoose';
 export type UserDocument = HydratedDocument<User>;
 
 @Schema({
-  timestamps: {
-    currentTime: () => Date.now() + 3 * 60 * 60 * 1000,
-  },
+  timestamps: true,
   collection: 'users',
 })
 export class User {
@@ -61,7 +59,13 @@ export class User {
     default: 0,
     min: 0,
   })
-  walletBalance!: number;
+  walletBalance!: number;   // game balance — funded by deposits, used to buy tickets
+
+  @Prop({
+    default: 0,
+    min: 0,
+  })
+  mainWallet!: number;      // winnings wallet — prizes go here, used for cashouts
 
   @Prop({
     unique: true,

@@ -17,6 +17,7 @@ import { RedisModule } from './redis/redis.module';
 import { SocketModule } from './socket/socket.module';
 import { AuthModule } from './auth/auth.module';
 import { GameModule } from './game/game.module';
+import { CashoutModule } from './cashout/cashout.module';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { GameModule } from './game/game.module';
     SocketModule,
     AuthModule,
     GameModule,
+    CashoutModule,
   ],
   controllers: [ApiController, HealthController],
   providers: [ApiService],
